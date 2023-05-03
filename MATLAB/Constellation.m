@@ -53,53 +53,109 @@ classdef Constellation < handle
             end
         end
 
-        function getInitialState(this)
+        function getInitialElements(this)
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        % ОПИСАНИЕ:
+        % Функция getInitialElements рассчитывает элементы орбит всех КА 
+        % в начальный момент времени. 
+        % 
+        % ВХОДНЫЕ ДАННЫЕ:
+        % Общие параметры каждой группы КА:
+        % inclination --- наклонение орбитальной плоскости,
+        % satsPerPlane --- число КА в каждой орбитальной плоскости группы,
+        % planeCount --- число орбитальных плоскостей в группе,
+        % и другие (см. функцию loadFromConfigFile).
+        %
+        % ВЫХОДНЫЕ ЗНАЧЕНИЯ:
+        % elements --- элементы орбиты группировки КА в ИСО 
+        % в начальный момент времени. Представляет собой массив размером
+        % [totalSatCount x 6], где totalSatCount есть полное число КА. 
+        % Значения столбцов: [радиус орбиты в [m], эксцентриситет орбиты 
+        % (равен нулю по умолчанию), (равен нулю по умолчанию), прямое 
+        % восхождение восходящего узла орбиты КА, наклон орбиты (в радианах),
+        % аргумент широты].
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+            % Инициализация искомого массива с начальными элементами орбиты
             this.state.elements = zeros(this.totalSatCount, 6);
+            
+            % Перебираем группы КА, расположенные на разных высотах
             shift = 1;
-
             for group = this.groups
-                for i = 1:length(group{1})
-                    ending = shift + group{1}(i).totalSatCount - 1;
-                    this.state.elements(shift:ending,:) = this.getInitialElements(group{1});
-                    shift = ending + 1;
-                end
-            end
-        end
+                satInGroupCount = group{1}.totalSatCount;
+                satPerPlaneInGroup = group{1}.satsPerPlane;
+                ending = shift + satInGroupCount - 1;
 
-        function elements = getInitialElements(this, group)
-            raans = linspace(group.startRaan, group.startRaan + group.maxRaan, group.planeCount + 1);
-            raans = mod(raans(1:end-1), 2 * pi);
+                % Создаем массив c прямыми восхождениями восходящих узлов орбит
+                raanArray = linspace(group{1}.startRaan, group{1}.startRaan + group{1}.maxRaan, group{1}.planeCount + 1);
+                raanArray = mod(raanArray(1:end-1), 2 * pi);
 
-            elements = zeros(group.totalSatCount, 6);
-            idx = 1;
-            raanIDX = 0;
-            for raan = raans
-                for i = 0:group.satsPerPlane-1
-                    sma = this.earthRadius + group.altitude * 1000;
-                    aol = 2 * pi / group.satsPerPlane * i + 2 * pi / group.totalSatCount * group.f * raanIDX;
+                % Инициализация массива с элементами данной группы
+                orbitElementsArray = zeros(satInGroupCount, 6);
 
-                    elements(idx, :) = [sma, 0, 0, raan, group.inclination, aol];
-                    idx = idx + 1;
-                end
-                raanIDX = raanIDX + 1;
-            end
+                % Расчет радиуса орбиты и аргумента широты
+                satInGroupNumber = 1;
+                raanIdx = 0;
+                for thisRaan = raanArray
+                    for satInPlaneNumber = 0:satPerPlaneInGroup-1
+                        sma = this.earthRadius + group{1}.altitude * 1000;
+                        aol = 2 * pi / satPerPlaneInGroup * satInPlaneNumber + 2 * pi / satInGroupCount * group{1}.f * raanIdx;
+
+                        orbitElementsArray(satInGroupNumber, :) = [sma, 0, 0, thisRaan, group{1}.inclination, aol];
+                        satInGroupNumber = satInGroupNumber + 1;
+                    end % Конец цикла по КА внутри данной плоскости
+                    raanIdx = raanIdx + 1;
+                end % Конец цикла по орбитальным плоскостям
+
+                % Заполнение искомого массива элементами данной группы
+                this.state.elements(shift:ending,:) = orbitElementsArray;
+                shift = ending + 1;
+            end % Конец цикла по группам КА
         end        
 
         function propagateJ2(this, epochs)
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        % ОПИСАНИЕ:
+        % Функция propagateJ2 рассчитывает положения КА в заданные моменты 
+        % времени (начальный момент времени равен нулю). Произведен 
+        % учет несферичности геопотенциала с точностью до второй зональной
+        % гармоники J2.
+        % 
+        % ВХОДНЫЕ ДАННЫЕ:
+        % epochs --- моменты времени в [s], в которые рассчитываются
+        % положения КА. Представляет собой вектор длиной length(epochs).
+        %
+        % ВЫХОДНЫЕ ЗНАЧЕНИЯ:
+        % state.eci --- декартовы координаты группировки КА в ИСО 
+        % в заданные моменты времени. Представляет собой массив размером
+        % [totalSatCount x 3 x length(epochs)], где totalSatCount есть
+        % полное число КА.
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+            
+            % Инициализация массива искомых (декартовых) координат КА
             this.state.eci = zeros(this.totalSatCount, 3, length(epochs));
 
-            sma         = this.state.elements(:, 1);
-            inclination = this.state.elements(:, 5);            
-            raan0       = this.state.elements(:, 4);
-            aol0        = this.state.elements(:, 6);
+            % Некоторы элементы невозмущенной орбиты на начальную эпоху
+            % (см. функцию getInitialElements)
+            sma          = this.state.elements(:, 1);
+            inclination  = this.state.elements(:, 5);            
+            raan0        = this.state.elements(:, 4);
+            aol0         = this.state.elements(:, 6);                          % аргумент широты на начальную эпоху
+            meanMotion   = sqrt(this.earthGM ./ sma.^3);                       % среднее движение КA в [1/s]
+            correctionJ2 = 1.5 * this.earthJ2 .* (this.earthRadius ./ sma).^2; % поправка за вторую зональную гармонику J2
 
-            raanPrecessionRate = -1.5 * (this.earthJ2 * this.earthGM^(1/2) * this.earthRadius^2) ./ (sma.^(7/2)) .* cos(inclination);
-            draconicOmega      = sqrt(this.earthGM ./ sma.^3) .* (1 - 1.5 * this.earthJ2 .* (this.earthRadius ./ sma).^2) .* (1 - 4 .* cos(inclination).^2);
+            % Учет второй зональной гармоники
+            raanPrecessionRate = - meanMotion .* correctionJ2 .* cos(inclination);
+            draconicOmega      = meanMotion .* (1 - correctionJ2) .* (1 - 4 .* cos(inclination).^2);
 
             for epochIdx = 1:length(epochs)
+
+                % Расчет аргумента широты и прямого восхождения на заданную
+                % эпоху и учет поправки за несферичность геопотенциала
                 aol = aol0 + epochs(epochIdx) * draconicOmega;
                 raanOmega = raan0 + epochs(epochIdx) * raanPrecessionRate;
 
+                % Переход от орбитальных к относительным координатам
                 this.state.eci(:, :, epochIdx)  = [sma .* (cos(aol) .* cos(raanOmega) - sin(aol) .* cos(inclination) .* sin(raanOmega)), ...
                                                    sma .* (cos(aol) .* sin(raanOmega) + sin(aol) .* cos(inclination) .* cos(raanOmega)), ...
                                                    sma .* (sin(aol) .* sin(inclination))];
